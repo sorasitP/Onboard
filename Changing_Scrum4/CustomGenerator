@@ -1,0 +1,129 @@
+import pandas as pd
+import os
+import json
+import fnmatch
+import tensorflow as tf
+from tensorflow.keras.utils import img_to_array, load_img
+class My_Custom_Generator(tf.keras.utils.Sequence) :
+  
+  def __init__(self, image_filenames, labels, batch_size, img_shape=(256,256)) :
+    self.image_filenames = image_filenames
+    self.labels = labels
+    self.batch_size = batch_size
+    self.img_shape = img_shape
+    
+    
+  def __len__(self) :
+    return (np.ceil(len(self.image_filenames) / float(self.batch_size))).astype("int")
+  
+  
+  def __getitem__(self, idx) :
+    batch_x = self.image_filenames[idx * self.batch_size : (idx+1) * self.batch_size]
+    batch_y = self.labels[idx * self.batch_size : (idx+1) * self.batch_size]
+    return np.array([
+            img_to_array(load_img(file_name, color_mode="rgb",target_size=self.img_shape))
+               for file_name in batch_x])/255.0, (np.array([batch_y])).swapaxes(0,1)
+
+def create_nih_label(path):
+    """function for creating one-hot label of NIH_CXR dataset from given file and save it as csv file
+        this function run once when first time of loading NIH_CXR dataset
+    """
+    nih_label_csv = pd.read_csv(path+"Data_Entry_2017.csv")
+    nih_label = pd.DataFrame()
+    nih_label['Image Index'] = nih_label_csv['Image Index']
+    nih_label['Finding Labels'] = nih_label_csv['Finding Labels']
+    nih_label['one_hot'] = None
+
+    nih_class = ["Atelectasis", "Cardiomegaly","Effusion","Infiltration","Mass","Nodule","Pneumonia","Pneumothorax","Consolidation","Edema","Emphysema","Fibrosis","Pleural_Thickening","Hernia"]
+    zero_onehot = [0 for j in range(len(nih_class))]
+    for idx,i in enumerate(nih_label['Finding Labels']):
+        onehot = zero_onehot.copy()
+        if i == 'No Finding':
+            nih_label['one_hot'].iloc[idx] = zero_onehot
+        else:
+            list_l = i.split('|')
+            for j in list_l:
+                onehot[nih_class.index(j)] = 1
+            nih_label['one_hot'].iloc[idx] = onehot
+    nih_label.to_csv("./nih_label.csv")
+    
+
+def Generator_NIH_CXR(nih_dataset_path = "D:/Work_archived/WIL-Onboard/NIH_dataset/",batch_size=32,img_height=256,img_width=256,disease="Infiltration",filter_mask = None,randomState=7):
+    """Use for creating custom generator with path_name of images from NIH CXR dataset
+        nih_dataset_path is directory of NIH_dataset
+        img_height, img_width is size of image when use to train model
+        filter_mask is when you need to filter out some samples
+        disease is name of disease for being the label
+    """
+    if not os.path.exists("./nih_label.csv"):
+        create_nih_label(nih_dataset_path)
+    nih_label = pd.read_csv("./nih_label.csv")
+    nih_dataset_path = "D:/Work_archived/WIL-Onboard/NIH_dataset"
+    data_label = []
+    nih_class = ["Atelectasis", "Cardiomegaly","Effusion","Infiltration","Mass","Nodule","Pneumonia","Pneumothorax","Consolidation","Edema","Emphysema","Fibrosis","Pleural_Thickening","Hernia"]
+    for i in nih_label['one_hot']:
+        data_label.append(json.loads(i))
+    data_label = np.array(data_label)
+    data_label = data_label.astype(float)
+    data_label = data_label.swapaxes(0,1)
+    list_image_dir=[]
+    for path in os.scandir(nih_dataset_path):
+        if path.is_dir():
+            list_image_dir.append(path.name)
+    for i,j in enumerate(list_image_dir):
+        list_image_dir[i] = nih_dataset_path + "/" + j + "/images"
+    
+    nb_train = 10 #number of folder to be train dataset (1 folder=10000 img)
+    nb_test = 1 #test dataset
+    train_path_images = []
+    test_path_images = []
+    for i in range(0,len(list_image_dir)):
+        if i <= nb_train:
+            for path in os.scandir(list_image_dir[i]):
+                train_path_images.append(list_image_dir[i] + '/' + path.name)
+        elif i <= nb_train+nb_test:
+            for path in os.scandir(list_image_dir[i]):
+                test_path_images.append(list_image_dir[i] + '/' + path.name)
+    train_label = []
+    test_label = []
+    for i in range(len(data_label)):
+        train_label.append(data_label[i][:len(train_path_images)])
+        test_label.append(data_label[i][len(train_path_images):len(train_path_images)+len(test_path_images)])
+
+    classes = 1
+    
+    train_path_images = np.array(train_path_images)
+    train_label = np.array(train_label)
+    splited_label = train_label.argsort()
+    splited_label = splited_label[nih_class.index(disease)][::-1]
+    splited_label = splited_label[:int((np.sum(train_label[nih_class.index(disease)]))*2)]
+    train_label = train_label.swapaxes(0,1)
+    train_label = train_label[splited_label]
+    train_path_images = train_path_images[splited_label]
+
+    np.random.seed(randomState)
+    np.random.shuffle(train_path_images)
+    np.random.shuffle(train_label)
+
+    if filter_mask:
+        filter_mask = filter_mask.astype(bool)
+        train_path_images = train_path_images[filter_mask]
+        train_label = train_label[filter_mask]
+    train_label = train_label.swapaxes(0,1)
+
+    noise_or_not = np.array(train_label[nih_class.index(disease)]!=train_label[nih_class.index(disease)])
+    noise_or_not = noise_or_not.astype(bool)
+    noise_or_not = ~noise_or_not
+
+    test_path_images = np.array(test_path_images)
+    test_label = np.array(test_label)
+    train_dataset = My_Custom_Generator(train_path_images, train_label[nih_class.index(disease)], batch_size, img_shape=(img_width,img_height))
+    test_dataset = My_Custom_Generator(test_path_images, test_label[nih_class.index(disease)], batch_size, img_shape=(img_width,img_height))
+        
+
+    input_shape = (len(train_path_images), img_width,img_height,3)
+
+    print('number of training samples = ',len(train_path_images))
+    print('number of test samples = ',len(test_path_images))
+
+    return train_dataset, test_dataset, input_shape, classes,noise_or_not
